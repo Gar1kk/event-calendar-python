@@ -1,6 +1,7 @@
 from tkinter import *
 from datetime import datetime, date
 import sqlite3
+from calendar_utils import parse_event_date, event_status
 
 # Подключаем базу данных и создаём таблицу событий, если её ещё нет.
 db = sqlite3.connect("events.db")
@@ -18,7 +19,7 @@ months = ["Январь", "Февраль", "Март", "Апрель", "Май"
 # Главное окно с кнопками добавления и просмотра событий.
 root = Tk()
 root.title("Календарь событий")
-root.geometry("400x300")
+root.geometry("430x350")
 
 
 # Открывает форму ввода названия и даты по кнопке «Добавить событие».
@@ -42,7 +43,7 @@ def add_event():
     # Обработчик кнопки «Сохранить»: проверяет введённые данные,
     # записывает событие в базу и очищает поля после сохранения.
     def save():
-        name = name_entry.get()
+        name = name_entry.get().strip()
         text_date = date_entry.get()
 
         if name == "":
@@ -51,7 +52,7 @@ def add_event():
 
         # Проверяем формат даты и существование такого дня в календаре.
         try:
-            event_date = datetime.strptime(text_date, "%d.%m.%Y").date()
+            event_date = parse_event_date(text_date)
         except ValueError:
             info["text"] = "Неверная дата"
             return
@@ -148,15 +149,7 @@ def open_events():
 
         for event_date, name in events:
             d = datetime.strptime(event_date, "%Y-%m-%d").date()
-            # Положительная разница — событие впереди, отрицательная — уже прошло.
-            difference = (d - date.today()).days
-
-            if difference > 0:
-                status = "Осталось дней: " + str(difference)
-            elif difference < 0:
-                status = "Прошло дней: " + str(-difference)
-            else:
-                status = "Сегодня"
+            status = event_status(d)
 
             result.insert(END, "Событие: " + name + "\n")
             result.insert(END, "Дата: " + d.strftime("%d.%m.%Y") + "\n")
@@ -167,6 +160,100 @@ def open_events():
            command=show_events).pack(side=LEFT, padx=20)
     Button(bottom, text="Назад", width=15,
            command=win.destroy).pack(side=RIGHT, padx=20)
+
+
+# Редактирование и удаление уже сохранённых событий.
+def manage_events():
+    win = Toplevel(root)
+    win.title("Управление событиями")
+    win.geometry("570x430")
+
+    Label(win, text="Выберите событие из списка").pack(pady=8)
+    event_list = Listbox(win, width=70, height=10, exportselection=False)
+    event_list.pack(padx=12, pady=5)
+
+    Label(win, text="Название:").pack()
+    name_entry = Entry(win, width=45)
+    name_entry.pack()
+    Label(win, text="Дата (дд.мм.гггг):").pack()
+    date_entry = Entry(win, width=45)
+    date_entry.pack()
+
+    info = Label(win, text="")
+    info.pack(pady=7)
+    event_ids = []
+
+    def reload_events():
+        event_list.delete(0, END)
+        event_ids.clear()
+        cursor.execute("SELECT id, event_date, name FROM events ORDER BY event_date, id")
+        for event_id, event_date, name in cursor.fetchall():
+            event_ids.append(event_id)
+            formatted_date = datetime.strptime(event_date, "%Y-%m-%d").strftime("%d.%m.%Y")
+            event_list.insert(END, formatted_date + " — " + name)
+
+    def selected_event_id():
+        choice = event_list.curselection()
+        if not choice:
+            info["text"] = "Сначала выберите событие"
+            return None
+        return event_ids[choice[0]]
+
+    def choose_event(event=None):
+        event_id = selected_event_id()
+        if event_id is None:
+            return
+        cursor.execute("SELECT event_date, name FROM events WHERE id = ?", (event_id,))
+        record = cursor.fetchone()
+        if record is None:
+            reload_events()
+            return
+        date_str, name = record
+        name_entry.delete(0, END)
+        name_entry.insert(0, name)
+        date_entry.delete(0, END)
+        date_entry.insert(0, datetime.strptime(date_str, "%Y-%m-%d").strftime("%d.%m.%Y"))
+        info["text"] = ""
+
+    def save_changes():
+        event_id = selected_event_id()
+        if event_id is None:
+            return
+        name = name_entry.get().strip()
+        if not name:
+            info["text"] = "Введите название события"
+            return
+        try:
+            new_date = parse_event_date(date_entry.get())
+        except ValueError:
+            info["text"] = "Неверная дата"
+            return
+        cursor.execute(
+            "UPDATE events SET name = ?, event_date = ? WHERE id = ?",
+            (name, new_date.isoformat(), event_id)
+        )
+        db.commit()
+        reload_events()
+        info["text"] = "Изменения сохранены!"
+
+    def delete_event():
+        event_id = selected_event_id()
+        if event_id is None:
+            return
+        from tkinter.messagebox import askyesno
+        if not askyesno("Удаление события", "Удалить выбранное событие?", parent=win):
+            return
+        cursor.execute("DELETE FROM events WHERE id = ?", (event_id,))
+        db.commit()
+        reload_events()
+        name_entry.delete(0, END)
+        date_entry.delete(0, END)
+        info["text"] = "Событие удалено"
+
+    event_list.bind("<<ListboxSelect>>", choose_event)
+    Button(win, text="Сохранить изменения", command=save_changes).pack(pady=4)
+    Button(win, text="Удалить событие", command=delete_event).pack(pady=4)
+    reload_events()
 
 
 # Заголовок, логотип и кнопки главного меню.
@@ -186,6 +273,8 @@ Button(root, text="Добавить событие", width=25,
        command=add_event).pack(pady=10)
 Button(root, text="Просмотр событий", width=25,
        command=open_events).pack(pady=10)
+Button(root, text="Управление событиями", width=25,
+       command=manage_events).pack(pady=10)
 
 # Обрабатываем действия пользователя до закрытия главного окна.
 root.mainloop()
